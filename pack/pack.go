@@ -438,7 +438,7 @@ func (c *Command) Pack(config Config) error {
 			return err
 		}
 		for _, filename := range filenames {
-			savepath := path.Join("bin", filename)
+			savepath := path.Join("bin", path.Base(filename))
 			if err := walksavefile(savepath, filename); err != nil {
 				return err
 			}

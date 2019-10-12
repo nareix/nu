@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/alexflint/go-arg"
+	"github.com/nareix/nu/fiximport"
 	"github.com/nareix/nu/pack"
 	"github.com/nareix/nu/utils"
 )
@@ -36,8 +37,9 @@ func (c *HttpCommand) Run() error {
 }
 
 type RootCmmand struct {
-	Http *HttpCommand  `arg:"subcommand:http"`
-	Pack *pack.Command `arg:"subcommand:pack"`
+	Http    *HttpCommand       `arg:"subcommand:http"`
+	Pack    *pack.Command      `arg:"subcommand:pack"`
+	Rewrite *fiximport.Command `arg:"subcommand:rewrite"`
 }
 
 func (c *RootCmmand) Run() error {
