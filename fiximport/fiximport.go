@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/ioutil"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -23,6 +24,8 @@ func (c *Command) Run() error {
 	if len(c.Paths) == 0 {
 		c.Paths = []string{"."}
 	}
+
+	log.Println("rewrite", c.RewriteImports)
 
 	if len(c.RewriteImports)%2 != 0 {
 		return fmt.Errorf("rewrite imports must be pair")

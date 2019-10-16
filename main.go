@@ -48,6 +48,8 @@ func (c *RootCmmand) Run() error {
 		return c.Http.Run()
 	case c.Pack != nil:
 		return c.Pack.Run()
+	case c.Rewrite != nil:
+		return c.Rewrite.Run()
 	default:
 		return arg.ErrHelp
 	}
