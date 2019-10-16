@@ -11,7 +11,7 @@ import (
 	"path"
 	"path/filepath"
 
-	"github.com/flynn/json5"
+	"github.com/nareix/utils/json5"
 )
 
 // func Exists(name string) bool {

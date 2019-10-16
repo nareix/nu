@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/alexflint/go-arg"
+	"github.com/nareix/nu/utils/go-arg"
 	"github.com/nareix/nu/fiximport"
 	"github.com/nareix/nu/pack"
 	"github.com/nareix/nu/utils"
