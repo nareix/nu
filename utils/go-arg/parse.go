@@ -1,16 +1,158 @@
 package arg
 
 import (
+	"encoding"
 	"encoding/csv"
 	"errors"
 	"fmt"
+	"net"
+	"net/mail"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
-
-	scalar "github.com/nareix/nu/utils/go-scalar"
+	"time"
 )
+
+// The reflected form of some special types
+var (
+	textUnmarshalerType = reflect.TypeOf([]encoding.TextUnmarshaler{}).Elem()
+	durationType        = reflect.TypeOf(time.Duration(0))
+	mailAddressType     = reflect.TypeOf(mail.Address{})
+	macType             = reflect.TypeOf(net.HardwareAddr{})
+)
+
+var (
+	errNotSettable    = errors.New("value is not settable")
+	errPtrNotSettable = errors.New("value is a nil pointer and is not settable")
+)
+
+// Parse assigns a value to v by parsing s.
+func scalarParse(dest interface{}, s string) error {
+	return scalarParseValue(reflect.ValueOf(dest), s)
+}
+
+// ParseValue assigns a value to v by parsing s.
+func scalarParseValue(v reflect.Value, s string) error {
+	// If we have a nil pointer then allocate a new object
+	if v.Kind() == reflect.Ptr && v.IsNil() {
+		if !v.CanSet() {
+			return errPtrNotSettable
+		}
+
+		v.Set(reflect.New(v.Type().Elem()))
+	}
+
+	// If it implements encoding.TextUnmarshaler then use that
+	if scalar, ok := v.Interface().(encoding.TextUnmarshaler); ok {
+		return scalar.UnmarshalText([]byte(s))
+	}
+	// If it's a value instead of a pointer, check that we can unmarshal it
+	// via TextUnmarshaler as well
+	if v.CanAddr() {
+		if scalar, ok := v.Addr().Interface().(encoding.TextUnmarshaler); ok {
+			return scalar.UnmarshalText([]byte(s))
+		}
+	}
+
+	// If we have a pointer then dereference it
+	if v.Kind() == reflect.Ptr {
+		v = v.Elem()
+	}
+
+	if !v.CanSet() {
+		return errNotSettable
+	}
+
+	// Switch on concrete type
+	switch scalar := v.Interface(); scalar.(type) {
+	case time.Duration:
+		duration, err := time.ParseDuration(s)
+		if err != nil {
+			return err
+		}
+		v.Set(reflect.ValueOf(duration))
+		return nil
+	case mail.Address:
+		addr, err := mail.ParseAddress(s)
+		if err != nil {
+			return err
+		}
+		v.Set(reflect.ValueOf(*addr))
+		return nil
+	case net.HardwareAddr:
+		ip, err := net.ParseMAC(s)
+		if err != nil {
+			return err
+		}
+		v.Set(reflect.ValueOf(ip))
+		return nil
+	}
+
+	// Switch on kind so that we can handle derived types
+	switch v.Kind() {
+	case reflect.String:
+		v.SetString(s)
+	case reflect.Bool:
+		x, err := strconv.ParseBool(s)
+		if err != nil {
+			return err
+		}
+		v.SetBool(x)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		x, err := strconv.ParseInt(s, 10, v.Type().Bits())
+		if err != nil {
+			return err
+		}
+		v.SetInt(x)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		x, err := strconv.ParseUint(s, 10, v.Type().Bits())
+		if err != nil {
+			return err
+		}
+		v.SetUint(x)
+	case reflect.Float32, reflect.Float64:
+		x, err := strconv.ParseFloat(s, v.Type().Bits())
+		if err != nil {
+			return err
+		}
+		v.SetFloat(x)
+	default:
+		return fmt.Errorf("cannot parse into %v", v.Type())
+	}
+	return nil
+}
+
+// CanParse returns true if the type can be parsed from a string.
+func scalarCanParse(t reflect.Type) bool {
+	// If it implements encoding.TextUnmarshaler then use that
+	if t.Implements(textUnmarshalerType) || reflect.PtrTo(t).Implements(textUnmarshalerType) {
+		return true
+	}
+
+	// If we have a pointer then dereference it
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+
+	// Check for other special types
+	switch t {
+	case durationType, mailAddressType, macType:
+		return true
+	}
+
+	// Fall back to checking the kind
+	switch t.Kind() {
+	case reflect.Bool:
+		return true
+	case reflect.String, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64:
+		return true
+	}
+	return false
+}
 
 // to enable monkey-patching during tests
 var osExit = os.Exit
@@ -54,6 +196,7 @@ type spec struct {
 	help       string
 	env        string
 	boolean    bool
+	defaultVal string // default value for this option
 }
 
 // command represents a named subcommand, or the top-level command
@@ -72,28 +215,39 @@ var ErrHelp = errors.New("help requested by user")
 // ErrVersion indicates that --version was provided
 var ErrVersion = errors.New("version requested by user")
 
-// MustParse processes command line arguments and exits upon failure
 func MustParse(dest ...interface{}) *Parser {
 	p, err := NewParser(Config{}, dest...)
 	if err != nil {
-		fmt.Println(err)
-		osExit(-1)
-		return nil // just in case osExit was monkey-patched
+		fmt.Fprintln(os.Stderr, err)
+		osExit(1)
+		return nil
 	}
 
 	err = p.Parse(flags())
 	switch {
 	case err == ErrHelp:
 		p.writeHelpForCommand(os.Stdout, p.lastCmd)
-		osExit(0)
+		osExit(1)
 	case err == ErrVersion:
 		fmt.Println(p.version)
-		osExit(0)
+		osExit(1)
 	case err != nil:
 		p.failWithCommand(err.Error(), p.lastCmd)
+		osExit(1)
 	}
 
 	return p
+}
+
+func MustRun(dest ...interface{}) error {
+	p := MustParse(dest...)
+	v := p.val(p.lastCmd.dest)
+	fn := v.MethodByName("Run")
+	if fn.IsZero() || fn.Type().NumOut() != 1 || !(fn.Type().Out(0).Kind() == reflect.Interface && fn.Type().Out(0).Name() == "error") {
+		return fmt.Errorf("no Run() error method")
+	}
+	ret := fn.Call(nil)
+	return ret[0].Interface().(error)
 }
 
 // Parse processes command line arguments and stores them in dest
@@ -192,6 +346,22 @@ func NewParser(config Config, dests ...interface{}) (*Parser, error) {
 		if err != nil {
 			return nil, err
 		}
+
+		// add nonzero field values as defaults
+		for _, spec := range cmd.specs {
+			if v := p.val(spec.dest); v.IsValid() && !isZero(v) {
+				if defaultVal, ok := v.Interface().(encoding.TextMarshaler); ok {
+					str, err := defaultVal.MarshalText()
+					if err != nil {
+						return nil, fmt.Errorf("%v: error marshaling default value to string: %v", spec.dest, err)
+					}
+					spec.defaultVal = string(str)
+				} else {
+					spec.defaultVal = fmt.Sprintf("%v", v)
+				}
+			}
+		}
+
 		p.cmd.specs = append(p.cmd.specs, cmd.specs...)
 		p.cmd.subcommands = append(p.cmd.subcommands, cmd.subcommands...)
 
@@ -250,6 +420,11 @@ func cmdFromStruct(name string, dest path, t reflect.Type) (*command, error) {
 			spec.help = help
 		}
 
+		defaultVal, hasDefault := field.Tag.Lookup("default")
+		if hasDefault {
+			spec.defaultVal = defaultVal
+		}
+
 		// Look at the tag
 		var isSubcommand bool // tracks whether this field is a subcommand
 		if tag != "" {
@@ -274,6 +449,11 @@ func cmdFromStruct(name string, dest path, t reflect.Type) (*command, error) {
 					}
 					spec.short = key[1:]
 				case key == "required":
+					if hasDefault {
+						errs = append(errs, fmt.Sprintf("%s.%s: 'required' cannot be used when a default value is specified",
+							t.Name(), field.Name))
+						return false
+					}
 					spec.required = true
 				case key == "positional":
 					spec.positional = true
@@ -326,6 +506,11 @@ func cmdFromStruct(name string, dest path, t reflect.Type) (*command, error) {
 			if !parseable {
 				errs = append(errs, fmt.Sprintf("%s.%s: %s fields are not supported",
 					t.Name(), field.Name, field.Type.String()))
+				return false
+			}
+			if spec.multiple && hasDefault {
+				errs = append(errs, fmt.Sprintf("%s.%s: default values are not supported for slice fields",
+					t.Name(), field.Name))
 				return false
 			}
 		}
@@ -401,7 +586,7 @@ func (p *Parser) captureEnvVars(specs []*spec, wasPresent map[*spec]bool) error 
 				)
 			}
 		} else {
-			if err := scalar.ParseValue(p.val(spec.dest), value); err != nil {
+			if err := scalarParseValue(p.val(spec.dest), value); err != nil {
 				return fmt.Errorf("error processing environment variable %s: %v", spec.env, err)
 			}
 		}
@@ -456,18 +641,9 @@ func (p *Parser) process(args []string) error {
 				return fmt.Errorf("invalid subcommand: %s", arg)
 			}
 
-			for _, c := range curCmd.subcommands {
-				if c != subcmd {
-					v := p.val(c.dest)
-					v.Set(reflect.NewAt(v.Type().Elem(), nil))
-				}
-			}
-
 			// instantiate the field to point to a new struct
 			v := p.val(subcmd.dest)
-			if v.IsNil() {
-				v.Set(reflect.New(v.Type().Elem())) // we already checked that all subcommands are struct pointers
-			}
+			v.Set(reflect.New(v.Type().Elem())) // we already checked that all subcommands are struct pointers
 
 			// add the new options to the set of allowed options
 			specs = append(specs, subcmd.specs...)
@@ -481,11 +657,6 @@ func (p *Parser) process(args []string) error {
 			curCmd = subcmd
 			p.lastCmd = curCmd
 			continue
-		}
-
-		for _, c := range curCmd.subcommands {
-			v := p.val(c.dest)
-			v.Set(reflect.NewAt(v.Type().Elem(), nil))
 		}
 
 		// check for special --help and --version flags
@@ -516,7 +687,7 @@ func (p *Parser) process(args []string) error {
 		if spec.multiple {
 			var values []string
 			if value == "" {
-				for i+1 < len(args) && !isFlag(args[i+1]) {
+				for i+1 < len(args) && !isFlag(args[i+1]) && args[i+1] != "--" {
 					values = append(values, args[i+1])
 					i++
 					if spec.separate {
@@ -551,15 +722,10 @@ func (p *Parser) process(args []string) error {
 			i++
 		}
 
-		err := scalar.ParseValue(p.val(spec.dest), value)
+		err := scalarParseValue(p.val(spec.dest), value)
 		if err != nil {
 			return fmt.Errorf("error processing %s: %v", arg, err)
 		}
-	}
-
-	for _, c := range curCmd.subcommands {
-		v := p.val(c.dest)
-		v.Set(reflect.NewAt(v.Type().Elem(), nil))
 	}
 
 	// process positionals
@@ -578,7 +744,7 @@ func (p *Parser) process(args []string) error {
 			}
 			positionals = nil
 		} else {
-			err := scalar.ParseValue(p.val(spec.dest), positionals[0])
+			err := scalarParseValue(p.val(spec.dest), positionals[0])
 			if err != nil {
 				return fmt.Errorf("error processing %s: %v", spec.long, err)
 			}
@@ -589,14 +755,25 @@ func (p *Parser) process(args []string) error {
 		return fmt.Errorf("too many positional arguments at '%s'", positionals[0])
 	}
 
-	// finally check that all the required args were provided
+	// fill in defaults and check that all the required args were provided
 	for _, spec := range specs {
-		if spec.required && !wasPresent[spec] {
-			name := spec.long
-			if !spec.positional {
-				name = "--" + spec.long
-			}
+		if wasPresent[spec] {
+			continue
+		}
+
+		name := spec.long
+		if !spec.positional {
+			name = "--" + spec.long
+		}
+
+		if spec.required {
 			return fmt.Errorf("%s is required", name)
+		}
+		if spec.defaultVal != "" {
+			err := scalarParseValue(p.val(spec.dest), spec.defaultVal)
+			if err != nil {
+				return fmt.Errorf("error processing default value for %s: %v", name, err)
+			}
 		}
 	}
 
@@ -609,7 +786,7 @@ func nextIsNumeric(t reflect.Type, s string) bool {
 		return nextIsNumeric(t.Elem(), s)
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Float32, reflect.Float64, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
 		v := reflect.New(t)
-		err := scalar.ParseValue(v, s)
+		err := scalarParseValue(v, s)
 		return err == nil
 	default:
 		return false
@@ -665,7 +842,7 @@ func setSlice(dest reflect.Value, values []string, trunc bool) error {
 
 	for _, s := range values {
 		v := reflect.New(elem)
-		if err := scalar.ParseValue(v.Elem(), s); err != nil {
+		if err := scalarParseValue(v.Elem(), s); err != nil {
 			return err
 		}
 		if !ptr {
@@ -697,4 +874,16 @@ func findSubcommand(cmds []*command, name string) *command {
 		}
 	}
 	return nil
+}
+
+// isZero returns true if v contains the zero value for its type
+func isZero(v reflect.Value) bool {
+	t := v.Type()
+	if t.Kind() == reflect.Slice {
+		return v.IsNil()
+	}
+	if !t.Comparable() {
+		return false
+	}
+	return v.Interface() == reflect.Zero(t).Interface()
 }
