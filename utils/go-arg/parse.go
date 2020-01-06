@@ -243,7 +243,7 @@ func MustRun(dest ...interface{}) error {
 	p := MustParse(dest...)
 	v := p.val(p.lastCmd.dest)
 	fn := v.MethodByName("Run")
-	if fn.IsZero() || fn.Type().NumOut() != 1 || !(fn.Type().Out(0).Kind() == reflect.Interface && fn.Type().Out(0).Name() == "error") {
+	if !fn.IsValid() || fn.Type().NumOut() != 1 || !(fn.Type().Out(0).Kind() == reflect.Interface && fn.Type().Out(0).Name() == "error") {
 		return fmt.Errorf("no Run() error method")
 	}
 	ret := fn.Call(nil)

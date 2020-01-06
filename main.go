@@ -1,38 +1,67 @@
 package main
 
 import (
+	"log"
 	"net/http"
-	"os"
+	"path/filepath"
+	"strings"
 
-	"github.com/nareix/nu/utils/go-arg"
 	"github.com/nareix/nu/fiximport"
 	"github.com/nareix/nu/pack"
 	"github.com/nareix/nu/utils"
+	"github.com/nareix/nu/utils/go-arg"
 )
 
 type HttpCommand struct {
-	Secure bool   `arg:"-s"`
-	Addr   string `arg:"-a"`
-	Cert   string `arg:"-c"`
-	Key    string `arg:"-k"`
-	Dir    string `arg:"-d"`
-}
-
-func NewHttpCommand() *HttpCommand {
-	return &HttpCommand{
-		Addr: ":8080",
-		Dir:  ".",
-	}
+	Secure            bool   `arg:"-s"`
+	Addr              string `arg:"-a"`
+	Cert              string `arg:"-c"`
+	Key               string `arg:"-k"`
+	Dir               string `arg:"-d"`
+	HostJSFile        string `arg:"--js"`
+	HostOnlyIndexHTML bool   `arg:"--indexhtml"`
 }
 
 func (c *HttpCommand) Run() error {
-	if c.Secure {
-		return http.ListenAndServeTLS(
-			c.Addr, c.Cert, c.Key,
-			http.FileServer(http.Dir(c.Dir)),
-		)
+	if c.Addr == "" {
+		c.Addr = ":8080"
+	}
+	if c.Dir == "" {
+		c.Dir = "."
+	}
+	log.Println("server http on", c.Addr, "dir", c.Dir)
+
+	serve := func(handler http.Handler) error {
+		if c.Secure {
+			return http.ListenAndServeTLS(
+				c.Addr, c.Cert, c.Key,
+				handler,
+			)
+		} else {
+			return http.ListenAndServe(c.Addr, handler)
+		}
+	}
+
+	if c.HostJSFile != "" {
+		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			w.Write([]byte(`<html><head><script src="index.js"></script></head><body></body></html>`))
+		})
+		http.HandleFunc("/index.js", func(w http.ResponseWriter, r *http.Request) {
+			http.ServeFile(w, r, c.HostJSFile)
+		})
+		return serve(nil)
+	} else if c.HostOnlyIndexHTML {
+		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.URL.Path, "/static") {
+				http.FileServer(http.Dir(c.Dir)).ServeHTTP(w, r)
+				return
+			}
+			http.ServeFile(w, r, filepath.Join(c.Dir, "index.html"))
+		})
+		return serve(nil)
 	} else {
-		return http.ListenAndServe(c.Addr, http.FileServer(http.Dir(c.Dir)))
+		return serve(http.FileServer(http.Dir(c.Dir)))
 	}
 }
 
@@ -42,32 +71,9 @@ type RootCmmand struct {
 	Rewrite *fiximport.Command `arg:"subcommand:rewrite"`
 }
 
-func (c *RootCmmand) Run() error {
-	switch {
-	case c.Http != nil:
-		return c.Http.Run()
-	case c.Pack != nil:
-		return c.Pack.Run()
-	case c.Rewrite != nil:
-		return c.Rewrite.Run()
-	default:
-		return arg.ErrHelp
-	}
-}
-
 func mainfn() error {
-	root := &RootCmmand{
-		Http: NewHttpCommand(),
-	}
-	p := arg.MustParse(root)
-	if err := root.Run(); err != nil {
-		if err == arg.ErrHelp {
-			p.WriteHelp(os.Stderr)
-			return nil
-		}
-		return err
-	}
-	return nil
+	root := &RootCmmand{}
+	return arg.MustRun(root)
 }
 
 func main() {
